@@ -1,4 +1,4 @@
-#!c:\Users\serig\Documents\GitHub\fordj_prog_kunskapskontroll_2\.venv\Scripts\python.exe
+#!C:\Users\andre\OneDrive\Dokument\vscode\Database_builder\Databse_building\.venv\Scripts\python.exe
 
 import datetime
 import os

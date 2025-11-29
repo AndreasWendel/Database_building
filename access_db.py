@@ -1,199 +1,171 @@
-import sqlite3
 import pandas as pd
 import datetime as dt
 import logging
-
+import os
+from sqlalchemy import create_engine, text
+import urllib
 
 logger = logging.getLogger()
-    
 
 class DBAccess():
-    def __init__(self,path,db) -> None:
+    def __init__(self, db_server="localhost", db_name="YourDatabase", driver="ODBC Driver 17 for SQL Server", trusted="yes") -> None:
         """
-        Initalising connection to database.
-
-        Args:
-            path (str): path to database from python
-            db (str): name of database.db
+        Initialising connection to SQL Server database using SQLAlchemy.
         """
+        params = urllib.parse.quote_plus(
+            f"DRIVER={{{driver}}};"
+            f"SERVER={db_server};"
+            f"DATABASE={db_name};"
+            f"Trusted_Connection={trusted};"
+        )
+        connection_string = f"mssql+pyodbc:///?odbc_connect={params}"
         
-        mode = "?mode=rw" 
-        #using mode and uri=true to raise error if database doesn't exist
-        #rw = read & write
-        #otherwise it will create a new database
         try:
-            self.conn = sqlite3.connect("file:"+path+db+mode, uri=True)
-        except sqlite3.Error as e:
+            self.engine = create_engine(connection_string)
+            # Test connection
+            with self.engine.connect() as conn:
+                pass
+        except Exception as e:
             logger.exception(e)
-            print(e)
-            print("Database doesn't exist")
-            logger.warning("give database doesn't exist, check path")
+            print("Database connection failed")
             raise
-        
-                
+
     def get_list_of_needed_updates(self):
         """
-        Gets the sp500 dataframe from sql and calculates which symbols
-        needs to be updated after earnings.
-        Also updates the current values in table.
-        
-        Returns:
-            list: list of symbols which needs to update, send to api
+        Gets the companies from financials.companies and calculates which symbols
+        needs to be updated.
         """
-        
-        #defined by datetime, present is greater than past
         today = dt.datetime.today()
-        df = pd.read_sql_query('SELECT * FROM SP500', self.conn)
-        df = df[["Symbol","Earnings date","Last update"]]
-        df["Earnings date"] = pd.to_datetime(df["Earnings date"], yearfirst=True)
-        df["Last update"] = pd.to_datetime(df["Last update"], yearfirst=True)
-        df["Need update"] = (
-                            (((df["Earnings date"]+ dt.timedelta(days=1)) <= today) & 
-                            (df["Last update"] <= (df["Earnings date"] + dt.timedelta(days=1)))) |
-                            (df["Last update"] < (today - dt.timedelta(days=730))) 
-                            )
-        #Checking if its time to update
-        #also check if last update is longer than 2 years
         
-        update_list = []
-        for i in range(len(df)):
-            if df["Need update"][i] == True:
-                update_list.append(df["Symbol"][i])
-        #skapar lista som returneras
+        query = "SELECT symbol, next_earnings_date, last_financials_update FROM financials.companies WHERE active = 1"
         
-        sql = 'UPDATE SP500 SET "Need update" = ? WHERE Symbol = ?'
-        for i in range(len(df["Symbol"])):
-            try:
-                cursor = self.conn.cursor()
-                cursor.execute(sql, (df["Need update"][i].item(),df["Symbol"][i]))
-                #item() is used as sql can't handle np.true_/false_
-                #item() returns the classic python True/False which sql can handle
-                self.conn.commit()
-            except sqlite3.Error as e:
-                logger.exception(e)
-                print(e)
-        #update sql table
+        try:
+            df = pd.read_sql_query(query, self.engine)
+        except Exception as e:
+            logger.error(f"Failed to read companies table: {e}")
+            return []
+
+        if df.empty:
+            return []
+
+        df["next_earnings_date"] = pd.to_datetime(df["next_earnings_date"])
+        df["last_financials_update"] = pd.to_datetime(df["last_financials_update"])
+        
+        # Logic: Update if today > next_earnings_date + 1 day AND last_update <= next_earnings_date + 1 day
+        # Or if last_update is very old (e.g., > 2 years)
+        
+        # Handle NaT/None
+        df["last_financials_update"] = df["last_financials_update"].fillna(pd.Timestamp("1900-01-01"))
+        
+        update_mask = (
+            ((df["next_earnings_date"] + dt.timedelta(days=1) <= today) & 
+             (df["last_financials_update"] <= df["next_earnings_date"] + dt.timedelta(days=1))) |
+            (df["last_financials_update"] < (today - dt.timedelta(days=730)))
+        )
+        
+        update_list = df.loc[update_mask, "symbol"].tolist()
+        
         if not update_list:
             logging.info("Nothing to update")
         
         return update_list      
     
-    
     def check_earnings_last_update(self):
         """
-        Checks the table sp500 if there are old earnings date.
-        Some companies might not have given a new date therefor an old date is in the api.
-
-        Returns:
-            list: list of symbols which need their earnings date updated
+        Checks if we need to update earnings dates.
         """
-        df = pd.read_sql_query('SELECT * FROM SP500', self.conn)
-        df = df[["Symbol","Earnings date","Last update"]]
-        symbols = []
-        for i in range(len(df)):
-            if df["Earnings date"][i] < df["Last update"][i] == True:
-                symbols.append(df["Symbol"][i])
-                
-        return symbols         
-         
-          
-    def update_earnings_date(self,df):
-        """
-        Update earnings date column in sp500 table
-        for given symbols.
-
-        Args:
-            df (pandas.DataFrame): dataframe with symbols and respective earnings date
-        """
-        
-        sql = 'UPDATE SP500 SET "Earnings date" = ? WHERE Symbol = ?'
-        for i in range(len(df["Symbol"])):
-            time = df["Earnings date"][i].strftime("%Y-%m-%d %H:%M:%S")
-            try:
-                cursor = self.conn.cursor()
-                cursor.execute(sql, (time,df["Symbol"][i]))
-                self.conn.commit()
-            except sqlite3.Error as e:
-                logger.exception(e)
-                print(e)
- 
- 
-    def update_last_update(self,time,financial_list):
-        """
-        update last update column in sp500 table.
-
-        Args:
-            time (str): timestamp of downloaded financials in str datatype
-            financial_list (list): list of symbols which has been updated
-        """
-        
-        sql = 'UPDATE SP500 SET "Last update" = ? WHERE Symbol = ?'
-        symbol = financial_list
-        for i in range(len(symbol)):
-            try:
-                cursor = self.conn.cursor()
-                cursor.execute(sql, (time,symbol[i]))
-                self.conn.commit()
-            except sqlite3.Error as e:
-                logger.exception(e)
-                print(e)
-                
-                
-    def create_financial_table(self,list):
-        """
-        Create new table for financial information.
-        Ex new symbol added for sp500 or create balance sheet, cashflow statements.
-
-        Args:
-            list (list): list which contrains dataframes in each element
-        """
-        
-        for i in range(len(list)):
-            df = list[i]
-            df.to_sql(df["Symbol"].iloc[0], self.conn, if_exists="replace")
-          
+        query = "SELECT symbol, next_earnings_date, last_financials_update FROM financials.companies WHERE active = 1"
+        try:
+            df = pd.read_sql_query(query, self.engine)
+            df["next_earnings_date"] = pd.to_datetime(df["next_earnings_date"])
+            df["last_financials_update"] = pd.to_datetime(df["last_financials_update"])
             
-    def insert_financial_data(self,list_of_df):
-        """
-        Insert new data in income statement table for given symbol.
-        Also checks new data has been update since the last if not,
-        returns a list for the symbol with old data.
-        Cause is probably that the api has not updated that data even though the earnings is released.
+            # If earnings date is in the past compared to last update, we probably need a new earnings date
+            mask = df["next_earnings_date"] < df["last_financials_update"]
+            return df.loc[mask, "symbol"].tolist()
+        except Exception:
+            return []
 
-        Args:
-            list_of_df (list): list of dataframes with income statements
-
-        Returns:
-            list: list of symbols which did not include new data
+    def update_earnings_date(self, df):
         """
-        
+        Update next_earnings_date in financials.companies
+        """
+        with self.engine.begin() as conn:
+            for i, row in df.iterrows():
+                if row["Earnings date"]:
+                    sql = text("UPDATE financials.companies SET next_earnings_date = :date WHERE symbol = :symbol")
+                    conn.execute(sql, {"date": row["Earnings date"], "symbol": row["Symbol"]})
+
+    def update_last_update(self, time, symbol_list):
+        """
+        Update last_financials_update in financials.companies
+        """
+        with self.engine.begin() as conn:
+            for symbol in symbol_list:
+                sql = text("UPDATE financials.companies SET last_financials_update = :time WHERE symbol = :symbol")
+                conn.execute(sql, {"time": time, "symbol": symbol})
+
+    def insert_financial_data(self, list_of_df):
+        """
+        Insert new data into financials tables.
+        """
         failed_update = []
-        for i in range(len(list_of_df)):
-            symbol = list_of_df[i]["Symbol"].iloc[0]
-            query = (f'SELECT * FROM {symbol}')
-            df = pd.read_sql_query(query, self.conn)
-            list_time = list_of_df[i].index[-1]
-            df_time = dt.datetime.strptime(df["index"].iloc[-1], '%Y-%m-%d %H:%M:%S')
-            if list_time == df_time:
-                print(symbol +" Already up to date")
-                logging.warning(symbol+" Table already up to date, should not happen check api or yahoo finance")
+        
+        for df in list_of_df:
+            if df.empty:
+                continue
+                
+            symbol = df["Symbol"].iloc[0]
+            statement_type = df["StatementType"].iloc[0]
+            
+            # Map statement type to table name
+            table_map = {
+                "Income Statement": "income_statement",
+                "Balance Sheet": "balance_sheet",
+                "Cash Flow": "cashflow_statement"
+            }
+            
+            table_name = table_map.get(statement_type)
+            if not table_name:
+                continue
+
+            # Clean up dataframe for insertion
+            # We need to ensure columns match the target table schema or use if_exists='append' with care
+            # For now, assuming we dump the raw data or need to map it. 
+            # Given the user's schema is just 'financials.income_statement', I'll assume it can take the yfinance columns 
+            # OR we might need to be more specific. 
+            # YFinance returns dates as columns. We need to melt this?
+            # Usually financial tables are (Symbol, Date, Metric, Value) or (Symbol, Date, Revenue, NetIncome...)
+            # The previous code did `df.T` so dates became the index.
+            
+            # Let's assume the target table expects: Symbol, Date, [Metrics...]
+            # The df from API is already transposed: Index=Date, Columns=Metrics + Symbol + StatementType
+            
+            df_to_insert = df.copy()
+            df_to_insert.index.name = "date"
+            df_to_insert = df_to_insert.reset_index()
+            
+            # Drop StatementType as it's implied by table
+            df_to_insert = df_to_insert.drop(columns=["StatementType"])
+            
+            try:
+                # We should check if data exists to avoid duplicates if no PK constraint
+                # But 'append' is what was requested.
+                df_to_insert.to_sql(table_name, self.engine, schema="financials", if_exists="append", index=False)
+                logging.info(f"{symbol} {statement_type} updated")
+            except Exception as e:
+                logger.error(f"Failed to insert {statement_type} for {symbol}: {e}")
                 failed_update.append(symbol)
-            else:
-                try:
-                    df_insert = list_of_df[i].tail(1)
-                    df_insert.to_sql(symbol, self.conn, if_exists="append")
-                    #if_exists="append" insert the dataframe into an existing table instead of creating/replacing
-                    logging.info(symbol + " has been updated")
-                except sqlite3.Error as e:
-                    logger.exception(e)
-                    print(e)
                     
-        return failed_update    
+        return list(set(failed_update))
     
-    
-    def close_connection (self):
-        """
-        Closes connection.
-        Always close connection.
-        """
-        self.conn.close()
+    def insert_daily_prices(self, list_of_df):
+        for df in list_of_df:
+            if df.empty: continue
+            try:
+                df.to_sql("daily_prices", self.engine, schema="financials", if_exists="append")
+            except Exception as e:
+                logger.error(f"Failed to insert prices: {e}")
+
+    def close_connection(self):
+        self.engine.dispose()
