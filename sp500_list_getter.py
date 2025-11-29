@@ -1,7 +1,5 @@
-import yfinance as yf
 import pandas as pd
 import requests
-import numpy as np
 import logging
 
 logger = logging.getLogger()
@@ -13,53 +11,104 @@ logging.basicConfig(
     )
 
 """
-Denna filen användes bara för att bygga upp början av databasen.
-Och kommer då inte kommenteras eller testas eftersom den inte skall vara med i den Schemalaggda delen.
-Man får självklart läsa igenom koden. eventuella egna kommentarer finns
+Denna fil används för att skrapa S&P 500-listan direkt från slickcharts.com 
+och fylla en DataFrame med bolagsnamn och symboler.
 """
 
 
 class GetSp500List:
     def __init__(self) -> None:
-        self.url = ("https://www.wikitable2json.com/api/List_of_S%26P_500_companies?table=0")
+        # Uppdaterad URL till Slickcharts S&P 500-sida
+        self.url = "https://www.slickcharts.com/sp500"
+        self.df = pd.DataFrame()
         
-             
     def request_to_pd(self):
-        self.data = requests.get(self.url).json() 
-        df = pd.DataFrame(columns = self.data[0][0])
-        for i in range(len(self.data[0])-1):
-            df.loc[len(df)] = self.data[0][i+1]
-        self.df = df
-        self.df["Earnings date"] = np.nan
-        self.df["Symbol"] = self.df["Symbol"].str.replace(".","-")
-        
+        """
+        Hämtar HTML-tabellen från Slickcharts URL och konverterar den till en Pandas DataFrame.
+        Använder 'requests' för att hämta innehållet och 'pandas.read_html' för att parsa tabellen.
+        """
+        try:
+            logger.info(f"Försöker hämta data från {self.url}...")
+            
+            # Använd pandas.read_html för att automatiskt hitta och parsa tabeller.
+            # Vi använder 'attrs' för att specificera den unika CSS-klassen på den önskade tabellen.
+            df_list = pd.read_html(
+                self.url,
+                attrs={'class': 'table table-hover table-borderless table-sm'}
+            )
+
+            if not df_list:
+                logger.error("Kunde inte hitta S&P 500-tabellen med den angivna CSS-klassen.")
+                return
+
+            # Den önskade tabellen är den första (och troligen enda) som matchar
+            df = df_list[0]
+            
+            # Kolumnerna från Slickcharts är: '#', 'Company', 'Symbol', 'Weight', 'Price', 'Chg', '% Chg'
+            # Vi väljer endast 'Company' och 'Symbol'.
+            self.df = df[["#", "Company", "Symbol", "Weight"]].copy()
+            self.df.set_index("#", inplace=True)            
+            
+            # Rename columns to match DB schema
+            self.df = self.df.rename(columns={
+                'Company': 'name', 
+                'Symbol': 'ticker',
+                'Weight': 'spy_weight'
+            })
+            
+            # Clean ticker - replace . with -
+            self.df["ticker"] = self.df["ticker"].str.replace(".", "-", regex=False)
+            
+            # Add ETF info
+            self.df["etfs"] = "SPY"
+            # Store weight as JSON for future expansion
+            self.df["etf_weights"] = self.df["spy_weight"].apply(lambda x: f'{{"SPY": {x}}}')
+            
+            # Add sector and industry as None (will be populated later if needed)
+            self.df["sector"] = None
+            self.df["industry"] = None
+            
+            # Keep only relevant columns for DB
+            self.df = self.df[["ticker", "name", "sector", "industry", "etfs", "etf_weights"]]
+            
+            logger.info(f"Hämtade framgångsrikt {len(self.df)} bolagssymboler.")
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Kunde inte ansluta till Slickcharts ({self.url}). Kontrollera din anslutning: {e}")
+        except Exception as e:
+            logger.error(f"Ett oväntat fel inträffade under HTML-skrapning: {e}")
     
-        
     def get_earnings_date(self):
-        self.df["Last update"] = "1900-01-01"
-        for i in range(len(self.df)):
-            try:
-                ticker = yf.Ticker(self.df["Symbol"][i])
-                if len(ticker.calendar["Earnings Date"]) >= 1:
-                    earning_date = ticker.calendar["Earnings Date"][0]
-                else:
-                    earning_date = None 
-                    logger.warning("No earnings date was found for "+ self.df["Symbol"][i]+ ", Date is set as None")
-            except Exception as e:
-                print(e)
-                logging.warning(e)
-                logging.warning("at "+ i)    
-            self.df.at[i, "Earnings date"] = earning_date
-                   
-    """
-    Notering, sparad log säger att vi fick 404 client error. samt en warning vid no earnings found hos BRK.B
-    BRK.B är ett stortföretag som skall har en earnings date. vi kontroll så uppmärks det att yahoo finance
-    har bytt ut punkt "." till bindes streck "-"
-    Error förekommer när vi försöker nå data från BF.B som försöker då nå en url hos .calendar som inte existerar
-    vilket krasha programmet.
-    
-    uppfölj: byt ut . mot -, byte görs nu i request_to_pd() metoden
-    """        
+        pass
+
+    def update_db(self):
+        from access_db import DBAccess
+        db = DBAccess()
+        try:
+            db.upsert_companies(self.df)
+            print("S&P 500 list updated in database.")
+        except Exception as e:
+            print(f"Failed to update database: {e}")
+        finally:
+            db.close_connection()
             
     def get_df(self):
+        """Returnerar den skrapade DataFramen."""
         return self.df
+
+
+# Exempel på körning för att testa skriptet:
+if __name__ == "__main__":
+    sp500_scraper = GetSp500List()
+    
+    # 1. Hämta S&P 500-listan genom HTML-skrapning
+    sp500_scraper.request_to_pd()
+    
+    # 2. Skriv ut resultatet (de första 10 raderna)
+    final_df = sp500_scraper.get_df()
+    
+    if not final_df.empty:
+        print("\n--- SLUTRESULTAT (FÖRSTA 10 RADER) ---")
+        print(final_df.head(10))
+    else:
+        print("\n--- Kunde inte hämta data. Kontrollera loggfilen (logfile.log) för fel. ---")

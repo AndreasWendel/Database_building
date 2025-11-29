@@ -17,3 +17,16 @@ END
 
 -- Optional: Initialize active to 1 if it was null (for existing rows)
 UPDATE [financials].[companies] SET [active] = 1 WHERE [active] IS NULL;
+
+
+-- cut 
+
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[financials].[companies]') AND name = 'etfs')
+BEGIN
+    ALTER TABLE [financials].[companies] ADD [etfs] NVARCHAR(MAX) NULL;
+END
+
+IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[financials].[companies]') AND name = 'etf_weights')
+BEGIN
+    ALTER TABLE [financials].[companies] ADD [etf_weights] NVARCHAR(MAX) NULL;
+END

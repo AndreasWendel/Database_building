@@ -27,7 +27,8 @@ class API:
         
     def get_financials(self):
         """
-        Downloads the financials statements from the given companies in quarterly format.
+        Downloads the financials statements from the given companies in both annual and quarterly format.
+        Formats data vertically: ticker, fiscal_date, field_name, field_value, unit, source, period_type, created_at
         """
         if not self.list_of_companies:
             logging.info("self.list_of_companies is empty")
@@ -39,19 +40,43 @@ class API:
                 ticker = yf.Ticker(symbol)
                 
                 # Helper to process dataframe
-                def process_df(df, type_name):
+                def process_df(df, table_name, period_type):
                     if not df.empty:
-                        df = df.T.iloc[::-1]
-                        df["Symbol"] = symbol
-                        df["StatementType"] = type_name
-                        self.list.append(df)
+                        # yfinance returns dates as columns. We need to melt.
+                        # df index is field names (e.g. 'Total Revenue')
+                        # df columns are dates
+                        
+                        # Reset index to make field names a column
+                        df = df.reset_index()
+                        df = df.rename(columns={"index": "field_name"})
+                        
+                        # Melt
+                        df_melted = df.melt(id_vars=["field_name"], var_name="fiscal_date", value_name="field_value")
+                        
+                        # Add metadata columns
+                        df_melted["ticker"] = symbol
+                        df_melted["unit"] = "currency" # Default, maybe refine later
+                        df_melted["source"] = "yfinance"
+                        df_melted["period_type"] = period_type
+                        df_melted["created_at"] = dt.datetime.now()
+                        df_melted["table_name"] = table_name
+                        
+                        # Ensure fiscal_date is date
+                        df_melted["fiscal_date"] = pd.to_datetime(df_melted["fiscal_date"]).dt.date
+                        
+                        self.list.append(df_melted)
                     else:
-                        logging.warning(f"{symbol} Quarterly {type_name} DF is empty")
+                        logging.warning(f"{symbol} {period_type} {table_name} DF is empty")
 
-                # Fetch Statements
-                process_df(ticker.quarterly_income_stmt, "Income Statement")
-                process_df(ticker.quarterly_balance_sheet, "Balance Sheet")
-                process_df(ticker.quarterly_cashflow, "Cash Flow")
+                # Fetch Statements (Annual)
+                process_df(ticker.get_income_stmt(freq="yearly"), "income_statement", "Annual")
+                process_df(ticker.get_balancesheet(freq="yearly"), "balance_sheet", "Annual")
+                process_df(ticker.get_cash_flow(freq="yearly"), "cashflow_statement", "Annual")
+                
+                # Fetch Statements (Quarterly)
+                process_df(ticker.get_income_stmt(freq="quarterly"), "income_statement", "Quarterly")
+                process_df(ticker.get_balancesheet(freq="quarterly"), "balance_sheet", "Quarterly")
+                process_df(ticker.get_cash_flow(freq="quarterly"), "cashflow_statement", "Quarterly")
                 
             except Exception as e:
                 logging.error(f"Failed to fetch data for {symbol}: {e}")
@@ -64,15 +89,41 @@ class API:
     def get_daily_prices(self):
         """
         Fetch daily prices for the companies.
-        Returns a list of DataFrames.
+        Returns a list of DataFrames formatted for database insertion.
         """
         price_list = []
         for symbol in self.list_of_companies:
             try:
-                # Fetch last 2 years of data
-                df = yf.download(symbol, period="2y", interval="1d", progress=False)
+                # Fetch all historical data
+                df = yf.download(symbol, period="max", interval="1d", progress=False)
+                
                 if not df.empty:
-                    df["Symbol"] = symbol
+                    # Flatten multi-level columns if present
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    
+                    # Reset index to make Date a column
+                    df = df.reset_index()
+                    
+                    # Rename columns to match database schema
+                    df = df.rename(columns={
+                        'Date': 'trade_date',
+                        'Open': 'open_price',
+                        'Close': 'close_price',
+                        'High': 'high_price',
+                        'Low': 'low_price',
+                        'Volume': 'volume'
+                    })
+                    
+                    # Add ticker column
+                    df['ticker'] = symbol
+                    
+                    # Select only the columns we need
+                    df = df[['ticker', 'trade_date', 'open_price', 'close_price', 'high_price', 'low_price', 'volume']]
+                    
+                    # Add created_at timestamp
+                    df['created_at'] = dt.datetime.now()
+                    
                     price_list.append(df)
                 else:
                     logging.warning(f"No price data for {symbol}")

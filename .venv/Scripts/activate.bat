@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set "VIRTUAL_ENV=C:\Users\andre\OneDrive\Dokument\vscode\Database_builder\Databse_building\.venv"
+set "VIRTUAL_ENV=C:\Users\andre\OneDrive\Dokument\vscode\Database_builder\Database_building\.venv"
 
 if not defined PROMPT set PROMPT=$P$G
 

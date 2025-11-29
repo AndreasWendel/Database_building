@@ -1,4 +1,4 @@
-#!C:\Users\andre\OneDrive\Dokument\vscode\Database_builder\Databse_building\.venv\Scripts\python.exe
+#!C:\Users\andre\OneDrive\Dokument\vscode\Database_builder\Database_building\.venv\Scripts\python.exe
 
 import datetime
 import os
